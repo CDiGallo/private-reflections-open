@@ -44,9 +44,7 @@ Both share the same persona and the same long-term memory.
 
 ## Requirements
 
-Everything below can be installed on a fresh **Windows 11** machine. You do **not**
-need a GPU — CPU works for Ollama, Whisper, and Kokoro. (A GPU only matters if you
-want the vLLM/HuggingFace backend, or much faster transcription.)
+Everything below can be installed on a fresh **Windows 11** machine. 
 
 - Windows 11 (or a recent Windows 10 build with WSLg)
 - WSL2 + a Linux distro (Ubuntu, installed below)
