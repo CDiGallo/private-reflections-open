@@ -1,0 +1,168 @@
+services:
+
+  # ── LLM backend (Ollama) ───────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama
+    container_name: diary-ollama
+    profiles: ["ollama"]
+    ports:
+      - "11434:11434"          # optional: only needed to reach Ollama from Windows
+    volumes:
+      - ollama:/root/.ollama   # downloaded models live here (survives rebuilds)
+    dns:
+      - 8.8.8.8                # some WSL setups need an explicit DNS to pull models
+      - 8.8.4.4
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 10s
+      start_period: 20s
+      retries: 5
+
+  # ── LLM backend (vLLM — HuggingFace models, GPU only) ──────────────────────
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: diary-vllm
+    profiles: ["huggingface"]
+    command: [
+      "--model", "${LLM_MODEL}",
+      "--quantization", "awq",
+      "--dtype", "auto",
+      "--gpu-memory-utilization", "0.85",
+      "--max-model-len", "4096",
+      "--enforce-eager"
+    ]
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - huggingface_cache:/root/.cache/huggingface
+    ports:
+      - "8080:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      # The vllm-openai image has no curl; use the bundled python instead.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health').status==200 else sys.exit(1)"]
+      interval: 15s
+      timeout: 10s
+      start_period: 240s
+      retries: 12
+
+  # ── Text-to-Speech (Kokoro) ────────────────────────────────────────────────
+  tts:
+    build: ./services/tts
+    container_name: diary-tts
+    ports:
+      - "8000:8000"
+    environment:
+      - PULSE_SERVER=${PULSE_SERVER:-/mnt/wslg/PulseServer}
+      - TTS_LANG=${TTS_LANG:-a}
+    volumes:
+      - /mnt/wslg:/mnt/wslg               # WSLg audio bridge (terminal speaker output)
+      - kokoro_cache:/root/.cache/huggingface
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 90s
+      retries: 15
+
+  # ── Speech-to-Text (Whisper) ───────────────────────────────────────────────
+  stt:
+    build: ./services/stt
+    container_name: diary-stt
+    ports:
+      - "8001:8001"
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-base}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
+    volumes:
+      - whisper_cache:/root/.cache/huggingface
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 10
+
+  # ── Terminal chat client ───────────────────────────────────────────────────
+  app:
+    build: ./services/app
+    container_name: diary-app
+    depends_on:
+      tts:
+        condition: service_healthy
+      stt:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - VLLM_URL=http://vllm:8000/v1
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - LLM_MODEL=${LLM_MODEL:-llama3.2}
+      - TTS_URL=http://tts:8000/tts
+      - STT_URL=http://stt:8001/stt
+      - TTS_VOICE=${TTS_VOICE:-af_sarah}
+      - PULSE_SERVER=${PULSE_SERVER:-/mnt/wslg/PulseServer}
+      - MAX_HISTORY=${MAX_HISTORY:-20}
+      - MEMORY_SESSIONS=${MEMORY_SESSIONS:-5}
+      - SAVE_KEYWORD=${SAVE_KEYWORD:-wrap up}
+    volumes:
+      # Windows folder <-> container. Your diary is written here, readable in Explorer.
+      - /mnt/c/Users/${WINDOWS_USER}/tts-out:/audio
+      - /mnt/wslg:/mnt/wslg
+      - ./services/app/system_prompt.txt:/app/system_prompt.txt:ro
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+
+  # ── Telegram bot (optional) ─────────────────────────────────────────────────
+  telegram:
+    build: ./services/telegram
+    container_name: diary-telegram
+    profiles: ["telegram"]
+    depends_on:
+      tts:
+        condition: service_healthy
+      stt:
+        condition: service_healthy
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_ALLOWED_USER_ID=${TELEGRAM_ALLOWED_USER_ID:-0}
+      - TELEGRAM_VOICE_REPLIES=${TELEGRAM_VOICE_REPLIES:-true}
+      - OLLAMA_HOST=http://ollama:11434
+      - VLLM_URL=http://vllm:8000/v1
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - LLM_MODEL=${LLM_MODEL:-llama3.2}
+      - TTS_URL=http://tts:8000/tts
+      - STT_URL=http://stt:8001/stt
+      - TTS_VOICE=${TTS_VOICE:-af_sarah}
+      - MAX_HISTORY=${MAX_HISTORY:-20}
+      - MEMORY_SESSIONS=${MEMORY_SESSIONS:-5}
+      - SAVE_KEYWORD=${SAVE_KEYWORD:-wrap up}
+    volumes:
+      - /mnt/c/Users/${WINDOWS_USER}/tts-out:/audio
+      - ./services/app/system_prompt.txt:/app/system_prompt.txt:ro
+    restart: unless-stopped
+
+volumes:
+  ollama:               # managed by Docker; created automatically on first run
+  huggingface_cache:
+  kokoro_cache:
+  whisper_cache:
